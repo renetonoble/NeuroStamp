@@ -5,3 +5,7 @@ __pycache__/
 static/uploads/*
 !static/uploads/.gitkeep
 .DS_Store
+/*.png
+/*.jpg
+/*.json
+!/assets/
