@@ -5,7 +5,7 @@ import random
 def load_image(path):
     """
     Loads an image in RGB mode.
-    CRITICAL FIX: Trims odd pixels to ensure Even dimensions.
+    Trims odd pixels to ensure Even dimensions for DWT.
     """
     img = Image.open(path).convert('RGB')
     arr = np.array(img)
@@ -47,24 +47,77 @@ def binary_to_text(binary):
                 pass
     return text
 
-
 def get_scrambled_indices(length, seed_key):
     """
     Generates a list of unique indices from 0 to length-1,
     shuffled deterministically based on the seed_key.
     """
-    # Create a list of all possible positions
     indices = list(range(length))
     
-    # Use the User's Key to seed the random number generator
     if isinstance(seed_key, str):
-        # Convert string to integer seed
         seed = sum(ord(c) for c in seed_key)
     else:
-        # If it's already a list/number, use as is
         seed = sum(seed_key) if isinstance(seed_key, list) else int(seed_key)
         
     random.seed(seed)
     random.shuffle(indices)
     
     return indices
+
+def compute_dhash(image_array):
+    """
+    Generates a 'Perceptual Hash' of the image.
+    Robust against watermarking, format changes, and slight resizing.
+    """
+    # 1. Convert to Grayscale PIL Image
+    img = Image.fromarray(image_array.astype('uint8')).convert('L')
+    
+    # 2. Resize to 9x8 (Reviewing 64 differences)
+    # We use 9x8 so we can compare adjacent pixels
+    img = img.resize((9, 8), Image.Resampling.LANCZOS)
+    
+    # 3. Compare Pixels
+    pixels = list(img.getdata())
+    diff_hash = ""
+    
+    # Iterate rows
+    for row in range(8):
+        for col in range(8):
+            # Compare pixel[x] with pixel[x+1]
+            pixel_left = pixels[row * 9 + col]
+            pixel_right = pixels[row * 9 + col + 1]
+            
+            # If left is brighter, bit is 1. Else 0.
+            diff_hash += "1" if pixel_left > pixel_right else "0"
+            
+    # Convert binary string to Hex for storage
+    decimal_val = int(diff_hash, 2)
+    hex_hash = hex(decimal_val)[2:] # Strip '0x'
+    
+    return hex_hash
+
+# ... keep existing imports ...
+
+def hex_to_binary(hex_str):
+    """Helper to convert Hex string to Binary string"""
+    scale = 16 
+    num_of_bits = len(hex_str) * 4
+    return bin(int(hex_str, scale))[2:].zfill(num_of_bits)
+
+def calculate_hamming_distance(hash1, hash2):
+    """
+    Counts how many bits are different between two hashes.
+    Lower number = More similar images.
+    """
+    if len(hash1) != len(hash2):
+        return 100 # Mismatch length, return high distance
+
+    bin1 = hex_to_binary(hash1)
+    bin2 = hex_to_binary(hash2)
+    
+    diff_count = 0
+    for b1, b2 in zip(bin1, bin2):
+        if b1 != b2:
+            diff_count += 1
+            
+    return diff_count

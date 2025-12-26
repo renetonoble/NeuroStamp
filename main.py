@@ -3,14 +3,21 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from src.database import SessionLocal, init_db, User
+
+# Import the new table (ImageRegistry)
+from src.database import SessionLocal, init_db, User, ImageRegistry
+
+# Import the new hash function (compute_dhash)
+from src.utils import load_image, save_image, text_to_binary, binary_to_text, compute_dhash
+
 from src.core import embed_watermark, extract_watermark
-from src.utils import load_image, save_image, text_to_binary, binary_to_text
 import shutil
 import os
 import numpy as np
-import random                 # NEW: For noise generation
-from PIL import Image, ImageFilter # NEW: For attack simulation
+import random
+from PIL import Image, ImageFilter
+
+from src.utils import load_image, save_image, text_to_binary, binary_to_text, compute_dhash, calculate_hamming_distance
 
 app = FastAPI()
 
@@ -39,7 +46,7 @@ async def home(request: Request):
 
 @app.post("/register")
 async def register_user(username: str = Form(...), db: Session = Depends(get_db)):
-    """Creates a new user with a random Base Key if they don't exist"""
+    """Creates a new user"""
     existing_user = db.query(User).filter(User.username == username).first()
     if existing_user:
         return {"status": "error", "message": "User already exists!"}
@@ -56,7 +63,7 @@ async def stamp_image(
     db: Session = Depends(get_db)
 ):
     """
-    Stamps the image and forces PNG output.
+    Stamps image with Security Checks (Double Spending Prevention).
     """
     user = db.query(User).filter(User.username == username).first()
     if not user:
@@ -67,15 +74,47 @@ async def stamp_image(
     with open(file_location, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
-    # 2. Load & Embed
     original = load_image(file_location)
-    watermark_text = f"User:{username}"
     
-    # 3. Apply NeuroStamp (Alpha=80 + Scrambling with username)
+    # --- SECURITY CHECK: PERCEPTUAL HASH ---
+    # Calculate the fingerprint of the incoming image
+    img_hash = compute_dhash(original)
+    
+    # --- SECURITY CHECK: FUZZY MATCHING ---
+    # We fetch ALL records and compare them one by one.
+    # (For a mini project with <1000 images, this is fast enough)
+    all_records = db.query(ImageRegistry).all()
+    existing_record = None
+    
+    for record in all_records:
+        distance = calculate_hamming_distance(img_hash, record.image_hash)
+        # Threshold 10: If hashes differ by less than 10 bits, it's the SAME image.
+        # This accounts for the noise added by the watermark.
+        if distance < 10:
+            existing_record = record
+            break
+            
+    if existing_record:
+        # If the owner is someone else, BLOCK IT
+        if existing_record.owner != username:
+            return {
+                "status": "error", 
+                "error": f"COPYRIGHT CONFLICT: This image is already registered to '{existing_record.owner}'."
+            }
+    # ---------------------------------------------------------------------------
+
+    # 2. Embed Watermark (Using Alpha 40 for Y-Channel)
+    watermark_text = f"User:{username}"
     watermarked_img, key_coeffs = embed_watermark(original, watermark_text, alpha=40, username=username)    
     
-    # 4. Save Key to DB
+    # 3. Save Key to User
     user.secret_key_data = key_coeffs
+    
+    # 4. Register the Hash (Claim Ownership)
+    if not existing_record:
+        new_record = ImageRegistry(image_hash=img_hash, owner=username)
+        db.add(new_record)
+        
     db.commit()
     
     # 5. Save Output (FORCE PNG)
@@ -110,7 +149,7 @@ async def verify_image(
     expected_text = f"User:{username}"
     expected_bits = len(expected_text) * 8
     
-    # 3. Decode (Alpha=80 + Scrambling with username)
+    # 3. Decode (Alpha must match stamp function! Using 40 for Y-Channel)
     recovered_bits = extract_watermark(suspicious, user.secret_key_data, alpha=40, length=expected_bits, username=username)
     recovered_text = binary_to_text(recovered_bits)
     
@@ -130,7 +169,7 @@ async def verify_image(
         "owner": username if is_match else "Unknown"
     }
 
-# --- NEW ATTACK SIMULATION ROUTE ---
+# --- ATTACK SIMULATION ROUTE ---
 
 @app.post("/attack")
 async def attack_image(
@@ -138,40 +177,32 @@ async def attack_image(
     attack_type: str = Form(...)
 ):
     """
-    Simulates an attack on an existing file in static/uploads.
-    Returns the path to the damaged file.
+    Simulates attacks.
     """
     file_path = f"static/uploads/{filename}"
     if not os.path.exists(file_path):
         return {"error": "File not found"}
     
-    # Load using standard PIL to manipulate
     img = Image.open(file_path).convert("RGB")
     
-    # 1. ATTACK: NOISE (Simulate bad sensor/ISO grain)
+    # 1. ATTACK: NOISE
     if attack_type == "noise":
         arr = np.array(img)
-        # Add random Gaussian noise
-        noise = np.random.normal(0, 25, arr.shape) # Standard Deviation = 25
+        noise = np.random.normal(0, 25, arr.shape)
         arr = arr + noise
         arr = np.clip(arr, 0, 255).astype(np.uint8)
         img = Image.fromarray(arr)
         
-    # 2. ATTACK: BLUR (Updated to Realistic "Soft Focus")
+    # 2. ATTACK: BLUR (Realistic Focus Blur)
     elif attack_type == "blur":
-        # Radius 0.8 simulates a slightly out-of-focus lens, which is a fair test.
-        # Radius 1.5+ is an intentional destruction attack.
         img = img.filter(ImageFilter.GaussianBlur(radius=0.8))
         
-    # 3. ATTACK: COMPRESSION (Updated to Standard Web Quality)
+    # 3. ATTACK: COMPRESSION (Standard Web Quality)
     elif attack_type == "jpeg":
-        # Quality 75 is the standard "High" quality for JPEG (WhatsApp/Web).
-        # Quality 50 introduces heavy blocking artifacts that destroy DWT data.
         temp_jpg = f"static/uploads/temp_attack_{filename}.jpg"
         img.save(temp_jpg, "JPEG", quality=75)
         img = Image.open(temp_jpg).convert("RGB")
         
-    # Save the attacked version as PNG (so we don't accidentally damage it further)
     attack_filename = f"attacked_{attack_type}_{filename}"
     attack_path = f"static/uploads/{attack_filename}"
     
