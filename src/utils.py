@@ -1,5 +1,6 @@
 from PIL import Image
 import numpy as np
+import random
 
 def load_image(path):
     """
@@ -45,3 +46,25 @@ def binary_to_text(binary):
             except:
                 pass
     return text
+
+
+def get_scrambled_indices(length, seed_key):
+    """
+    Generates a list of unique indices from 0 to length-1,
+    shuffled deterministically based on the seed_key.
+    """
+    # Create a list of all possible positions
+    indices = list(range(length))
+    
+    # Use the User's Key to seed the random number generator
+    if isinstance(seed_key, str):
+        # Convert string to integer seed
+        seed = sum(ord(c) for c in seed_key)
+    else:
+        # If it's already a list/number, use as is
+        seed = sum(seed_key) if isinstance(seed_key, list) else int(seed_key)
+        
+    random.seed(seed)
+    random.shuffle(indices)
+    
+    return indices

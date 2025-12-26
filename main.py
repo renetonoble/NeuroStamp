@@ -70,8 +70,9 @@ async def stamp_image(
     watermark_text = f"User:{username}"
     
     # 3. Apply NeuroStamp (Updated to Alpha=80 for robustness)
-    watermarked_img, key_coeffs = embed_watermark(original, watermark_text, alpha=80)
-    
+
+    # Pass username to seed the scrambler
+    watermarked_img, key_coeffs = embed_watermark(original, watermark_text, alpha=80, username=username)    
     # 4. Save Key to DB
     user.secret_key_data = key_coeffs
     db.commit()
@@ -110,7 +111,8 @@ async def verify_image(
     expected_bits = len(expected_text) * 8
     
     # 3. Decode (Alpha must match stamp function! Using 80)
-    recovered_bits = extract_watermark(suspicious, user.secret_key_data, alpha=80, length=expected_bits)
+    # Pass username to seed the scrambler (must match!)
+    recovered_bits = extract_watermark(suspicious, user.secret_key_data, alpha=80, length=expected_bits, username=username)
     recovered_text = binary_to_text(recovered_bits)
     
     # --- DEBUG PRINT (Now in the correct place) ---

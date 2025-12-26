@@ -1,5 +1,6 @@
 import pywt
 import numpy as np
+from src.utils import get_scrambled_indices
 
 # --- TRANSFORM LOGIC ---
 def apply_dwt(matrix):
@@ -8,12 +9,11 @@ def apply_dwt(matrix):
 def inverse_dwt(coeffs):
     return pywt.idwt2(coeffs, 'haar')
 
-# --- CORE ENGINE ---
+# --- SECURE CORE ENGINE ---
 
-def embed_channel(channel_matrix, binary_watermark, alpha=50):
+def embed_channel(channel_matrix, binary_watermark, alpha=80, secret_key="default"):
     """
-    Internal function to watermark a single color channel.
-    Input is guaranteed to be even dimensions now.
+    SECURE VERSION: Uses Secret Key Permutation.
     """
     LL, (LH, HL, HH) = apply_dwt(channel_matrix)
     flat_HL = HL.flatten()
@@ -21,78 +21,92 @@ def embed_channel(channel_matrix, binary_watermark, alpha=50):
     # Store original for key
     original_coeffs = flat_HL.copy()
     
-    # Embedding Logic
-    offset = 1000 
+    # 1. GENERATE SECRET POSITIONS
+    # We use the secret_key to shuffle the pixel locations
+    max_slots = len(flat_HL)
+    scrambled_indices = get_scrambled_indices(max_slots, secret_key)
+    
+    # 2. EMBED
+    # We skip the first 1000 'scrambled' positions to be safe
+    start_pos = 1000
+    
     for i in range(len(binary_watermark)):
-        if i + offset >= len(flat_HL): break
+        if start_pos + i >= len(scrambled_indices): break
+        
+        # Look up the SECRET location
+        target_idx = scrambled_indices[start_pos + i]
+        
         if binary_watermark[i] == '1':
-            flat_HL[i + offset] += alpha
+            flat_HL[target_idx] += alpha
             
     modified_HL = flat_HL.reshape(HL.shape)
     watermarked_channel = inverse_dwt((LL, (LH, modified_HL, HH)))
     
-    # NO CROPPING NEEDED anymore
     return watermarked_channel, original_coeffs
 
-def extract_channel(channel_matrix, key, alpha=50, length=128):
+def extract_channel(channel_matrix, key, alpha=80, length=128, secret_key="default"):
     """
-    Internal function to read data.
+    SECURE VERSION: Can only extract if you know the Secret Key permutation.
     """
     LL, (LH, HL, HH) = apply_dwt(channel_matrix)
     flat_HL = HL.flatten()
-    offset = 1000
+    
+    # 1. REGENERATE SECRET POSITIONS
+    # This MUST match the embedding logic exactly
+    max_slots = len(flat_HL)
+    scrambled_indices = get_scrambled_indices(max_slots, secret_key)
+    
+    start_pos = 1000
     extracted_bits = ""
     threshold = alpha * 0.5
     
     for i in range(length):
-        if i + offset >= len(flat_HL): break
-        diff = flat_HL[i + offset] - key[i + offset]
+        if start_pos + i >= len(scrambled_indices): break
+        
+        # Look up the SAME secret location
+        target_idx = scrambled_indices[start_pos + i]
+        
+        diff = flat_HL[target_idx] - key[target_idx]
+        
         if diff > threshold:
             extracted_bits += "1"
         else:
             extracted_bits += "0"
+            
     return extracted_bits
 
-# --- PUBLIC FUNCTIONS ---
+# --- PUBLIC FUNCTIONS (Updated to accept username) ---
 
-def embed_watermark(image_array, watermark_text, alpha=80):
+def embed_watermark(image_array, watermark_text, alpha=80, username="default"):
     """
     Handles Color (RGB) and Grayscale.
     """
-    # 1. Check if Color or Grayscale
     if len(image_array.shape) == 3:
-        # RGB Mode
         R = image_array[:, :, 0]
         G = image_array[:, :, 1]
         B = image_array[:, :, 2]
         
-        # Text to Binary
         binary_msg = "".join(format(ord(c), '08b') for c in watermark_text)
-        print(f"   🔹 Injecting {len(binary_msg)} bits into Blue Channel...")
         
-        # Embed in Blue
-        watermarked_B, key_coeffs = embed_channel(B, binary_msg, alpha)
+        # PASS USERNAME AS SECRET KEY
+        watermarked_B, key_coeffs = embed_channel(B, binary_msg, alpha, secret_key=username)
         
-        # Stack Back Together
         watermarked_image = np.dstack((R, G, watermarked_B))
         return watermarked_image, key_coeffs.tolist()
         
     else:
-        # Grayscale Mode (Fallback)
-        print("   🔹 Grayscale detected.")
+        # Grayscale
         binary_msg = "".join(format(ord(c), '08b') for c in watermark_text)
-        watermarked_img, key_coeffs = embed_channel(image_array, binary_msg, alpha)
+        watermarked_img, key_coeffs = embed_channel(image_array, binary_msg, alpha, secret_key=username)
         return watermarked_img, key_coeffs.tolist()
 
-def extract_watermark(image_array, key, alpha=50, length=None):
+def extract_watermark(image_array, key, alpha=80, length=None, username="default"):
     """
     Extracts from Blue channel (if RGB) or Main channel (if Gray).
     """
     if len(image_array.shape) == 3:
-        # Get Blue Channel
         target_channel = image_array[:, :, 2]
     else:
-        # Get Grayscale Channel
         target_channel = image_array
         
-    return extract_channel(target_channel, key, alpha, length)
+    return extract_channel(target_channel, key, alpha, length, secret_key=username)
