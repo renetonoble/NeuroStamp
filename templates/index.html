@@ -40,12 +40,26 @@
             <div class="col-md-4">
                 <div class="card h-100">
                     <div class="card-body text-center">
-                        <h3>2. Stamp Image</h3>
-                        <p class="text-muted">Embed your invisible ID.</p>
+                        <h3>2. Stamp & Attack</h3>
+                        <p class="text-muted">Embed ID or Test Robustness.</p>
+                        
                         <input type="text" id="stamp-username" class="form-control mb-2" placeholder="Your Username">
                         <input type="file" id="stamp-file" class="form-control mb-3">
-                        <button onclick="stampImage()" class="btn btn-primary w-100">Stamp & Download</button>
-                        <a id="download-link" class="btn btn-success w-100 mt-3 d-none" download>Download Image</a>
+                        <button onclick="stampImage()" class="btn btn-primary w-100 mb-3">Stamp & Download</button>
+                        
+                        <div id="download-area" class="d-none mb-3">
+                            <a id="download-link" class="btn btn-success w-100" download>Download Result</a>
+                            <input type="hidden" id="current-filename"> </div>
+
+                        <hr>
+                        
+                        <h6 class="text-danger">⚔️ Simulation Lab</h6>
+                        <div class="btn-group w-100" role="group">
+                            <button onclick="attack('noise')" class="btn btn-outline-danger">Noise</button>
+                            <button onclick="attack('blur')" class="btn btn-outline-warning">Blur</button>
+                            <button onclick="attack('jpeg')" class="btn btn-outline-secondary">JPEG</button>
+                        </div>
+                        <div id="attack-result" class="mt-2 small text-danger fw-bold"></div>
                     </div>
                 </div>
             </div>
@@ -93,11 +107,40 @@
 
             if(data.status === "success") {
                 let link = document.getElementById('download-link');
-                link.href = data.download_url;
-                link.classList.remove('d-none');
+                let area = document.getElementById('download-area');
+                
+                // EXTRACT FILENAME from URL so the attack function knows what to attack
+                let fullPath = data.download_url;
+                let filename = fullPath.split("/").pop(); // Get 'stamped_lena.png'
+                document.getElementById('current-filename').value = filename;
+
+                link.href = fullPath;
+                area.classList.remove('d-none');
                 link.innerText = "Download Protected Image ⬇️";
             } else {
                 alert("Error: " + data.error);
+            }
+        }
+
+        async function attack(type) {
+            let filename = document.getElementById('current-filename').value;
+            if(!filename) {
+                alert("Please Stamp an image first!");
+                return;
+            }
+            
+            let formData = new FormData();
+            formData.append("filename", filename);
+            formData.append("attack_type", type);
+            
+            document.getElementById('attack-result').innerText = "Running Attack...";
+            
+            let response = await fetch('/attack', { method: 'POST', body: formData });
+            let data = await response.json();
+            
+            if(data.status === "success") {
+                document.getElementById('attack-result').innerHTML = 
+                    `Attack Complete! <a href="${data.attack_url}" download>Download Damaged</a>`;
             }
         }
 

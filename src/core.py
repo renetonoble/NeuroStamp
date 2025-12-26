@@ -1,5 +1,6 @@
 import pywt
 import numpy as np
+from PIL import Image
 from src.utils import get_scrambled_indices
 
 # --- TRANSFORM LOGIC ---
@@ -9,104 +10,144 @@ def apply_dwt(matrix):
 def inverse_dwt(coeffs):
     return pywt.idwt2(coeffs, 'haar')
 
-# --- SECURE CORE ENGINE ---
+# --- BIPOLAR ROBUST ENGINE (Level 2 + Y-Channel + Sign Detection) ---
 
-def embed_channel(channel_matrix, binary_watermark, alpha=80, secret_key="default"):
+def embed_channel(channel_matrix, binary_watermark, alpha=30, secret_key="default"):
     """
-    SECURE VERSION: Uses Secret Key Permutation.
+    SCIENTIFIC UPGRADE:
+    1. Uses Level 2 DWT (Mid-Frequencies).
+    2. Uses BIPOLAR embedding (+Alpha for 1, -Alpha for 0).
+       This centers the signal around 0, making it robust to fading.
     """
-    LL, (LH, HL, HH) = apply_dwt(channel_matrix)
-    flat_HL = HL.flatten()
+    # 1. Level 1 DWT
+    LL1, (LH1, HL1, HH1) = apply_dwt(channel_matrix)
     
-    # Store original for key
-    original_coeffs = flat_HL.copy()
+    # 2. Level 2 DWT
+    LL2, (LH2, HL2, HH2) = apply_dwt(LL1)
     
-    # 1. GENERATE SECRET POSITIONS
-    # We use the secret_key to shuffle the pixel locations
-    max_slots = len(flat_HL)
+    # Target: LH2 (Vertical Mid-Frequencies)
+    flat_target = LH2.flatten()
+    original_coeffs = flat_target.copy()
+    
+    # --- REDUNDANCY ---
+    max_slots = len(flat_target)
     scrambled_indices = get_scrambled_indices(max_slots, secret_key)
     
-    # 2. EMBED
-    # We skip the first 1000 'scrambled' positions to be safe
-    start_pos = 1000
+    start_pos = 100
+    available_space = max_slots - start_pos
+    num_repeats = available_space // len(binary_watermark)
+    if num_repeats < 1: num_repeats = 1
     
-    for i in range(len(binary_watermark)):
+    full_message = binary_watermark * num_repeats
+    
+    # --- BIPOLAR EMBEDDING ---
+    for i in range(len(full_message)):
         if start_pos + i >= len(scrambled_indices): break
-        
-        # Look up the SECRET location
         target_idx = scrambled_indices[start_pos + i]
         
-        if binary_watermark[i] == '1':
-            flat_HL[target_idx] += alpha
+        # KEY CHANGE: Bipolar Logic
+        if full_message[i] == '1':
+            flat_target[target_idx] += alpha  # Boost
+        else:
+            flat_target[target_idx] -= alpha  # Suppress
             
-    modified_HL = flat_HL.reshape(HL.shape)
-    watermarked_channel = inverse_dwt((LL, (LH, modified_HL, HH)))
+    # Reshape
+    modified_LH2 = flat_target.reshape(LH2.shape)
+    
+    # --- RECONSTRUCTION (With Dimension Fix) ---
+    modified_LL1 = inverse_dwt((LL2, (modified_LH2, HL2, HH2)))
+    
+    # Crop to match Level 1 parent
+    h, w = LH1.shape
+    modified_LL1 = modified_LL1[:h, :w]
+    
+    watermarked_channel = inverse_dwt((modified_LL1, (LH1, HL1, HH1)))
     
     return watermarked_channel, original_coeffs
 
-def extract_channel(channel_matrix, key, alpha=80, length=128, secret_key="default"):
+def extract_channel(channel_matrix, key, alpha=30, length=128, secret_key="default"):
     """
-    SECURE VERSION: Can only extract if you know the Secret Key permutation.
+    SCIENTIFIC UPGRADE:
+    Uses Sign-Based Detection (Threshold = 0).
+    Robust against signal fading (Blur/JPEG).
     """
-    LL, (LH, HL, HH) = apply_dwt(channel_matrix)
-    flat_HL = HL.flatten()
+    LL1, (LH1, HL1, HH1) = apply_dwt(channel_matrix)
+    LL2, (LH2, HL2, HH2) = apply_dwt(LL1)
     
-    # 1. REGENERATE SECRET POSITIONS
-    # This MUST match the embedding logic exactly
-    max_slots = len(flat_HL)
+    flat_target = LH2.flatten()
+    
+    # --- VOTING ---
+    max_slots = len(flat_target)
     scrambled_indices = get_scrambled_indices(max_slots, secret_key)
     
-    start_pos = 1000
-    extracted_bits = ""
-    threshold = alpha * 0.5
+    start_pos = 100
+    available_space = max_slots - start_pos
+    num_repeats = available_space // length
+    if num_repeats < 1: num_repeats = 1
     
-    for i in range(length):
-        if start_pos + i >= len(scrambled_indices): break
-        
-        # Look up the SAME secret location
-        target_idx = scrambled_indices[start_pos + i]
-        
-        diff = flat_HL[target_idx] - key[target_idx]
-        
-        if diff > threshold:
+    # vote_score[i] will store the sum of differences
+    # If sum > 0 -> Bit 1. If sum < 0 -> Bit 0.
+    vote_score = [0.0] * length
+    
+    for r in range(num_repeats):
+        for i in range(length):
+            abs_idx = start_pos + (r * length) + i
+            if abs_idx >= len(scrambled_indices): break
+            target_idx = scrambled_indices[abs_idx]
+            
+            try:
+                # Calculate difference
+                diff = flat_target[target_idx] - key[target_idx]
+                # Accumulate the raw signal (Soft Voting)
+                vote_score[i] += diff
+            except IndexError:
+                pass
+                
+    # --- DECISION ---
+    extracted_bits = ""
+    for score in vote_score:
+        # KEY CHANGE: Zero Threshold
+        # Since we did +Alpha and -Alpha, the average is 0.
+        # Anything positive is likely a 1, even if faded.
+        if score > 0:
             extracted_bits += "1"
         else:
             extracted_bits += "0"
             
     return extracted_bits
 
-# --- PUBLIC FUNCTIONS (Updated to accept username) ---
+# --- PUBLIC FUNCTIONS (Switched to Y-Channel) ---
 
-def embed_watermark(image_array, watermark_text, alpha=80, username="default"):
+def embed_watermark(image_array, watermark_text, alpha=30, username="default"):
     """
-    Handles Color (RGB) and Grayscale.
+    Converts to YCbCr and embeds in Luminance (Y).
+    Alpha is lower (30) because Y is more sensitive, but Bipolar logic makes it robust.
     """
-    if len(image_array.shape) == 3:
-        R = image_array[:, :, 0]
-        G = image_array[:, :, 1]
-        B = image_array[:, :, 2]
-        
-        binary_msg = "".join(format(ord(c), '08b') for c in watermark_text)
-        
-        # PASS USERNAME AS SECRET KEY
-        watermarked_B, key_coeffs = embed_channel(B, binary_msg, alpha, secret_key=username)
-        
-        watermarked_image = np.dstack((R, G, watermarked_B))
-        return watermarked_image, key_coeffs.tolist()
-        
-    else:
-        # Grayscale
-        binary_msg = "".join(format(ord(c), '08b') for c in watermark_text)
-        watermarked_img, key_coeffs = embed_channel(image_array, binary_msg, alpha, secret_key=username)
-        return watermarked_img, key_coeffs.tolist()
+    # 1. Convert Array -> Image -> YCbCr
+    img_pil = Image.fromarray(image_array.astype('uint8')).convert('YCbCr')
+    y, cb, cr = img_pil.split()
+    
+    y_array = np.array(y)
+    
+    # 2. Embed in Y Channel
+    binary_msg = "".join(format(ord(c), '08b') for c in watermark_text)
+    watermarked_y_array, key_coeffs = embed_channel(y_array, binary_msg, alpha, secret_key=username)
+    
+    # 3. Merge Back
+    watermarked_y_array = np.clip(watermarked_y_array, 0, 255).astype('uint8')
+    watermarked_y = Image.fromarray(watermarked_y_array)
+    
+    final_img = Image.merge('YCbCr', (watermarked_y, cb, cr)).convert('RGB')
+    
+    return np.array(final_img), key_coeffs.tolist()
 
-def extract_watermark(image_array, key, alpha=80, length=None, username="default"):
+def extract_watermark(image_array, key, alpha=30, length=None, username="default"):
     """
-    Extracts from Blue channel (if RGB) or Main channel (if Gray).
+    Extracts from Y Channel.
     """
-    if len(image_array.shape) == 3:
-        target_channel = image_array[:, :, 2]
-    else:
-        target_channel = image_array
-        
-    return extract_channel(target_channel, key, alpha, length, secret_key=username)
+    # 1. Convert -> YCbCr -> Extract Y
+    img_pil = Image.fromarray(image_array.astype('uint8')).convert('YCbCr')
+    y, cb, cr = img_pil.split()
+    y_array = np.array(y)
+    
+    return extract_channel(y_array, key, alpha, length, secret_key=username)
