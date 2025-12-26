@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeuroStamp | Digital Ownership</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .hero { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 3rem 0; margin-bottom: 2rem; }
+        .card { border: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: transform 0.2s; }
+        .card:hover { transform: translateY(-5px); }
+        .btn-primary { background-color: #764ba2; border: none; }
+        .btn-primary:hover { background-color: #5a3782; }
+        #result-area { display: none; margin-top: 20px; }
+    </style>
+</head>
+<body>
+
+    <div class="hero text-center">
+        <h1>🧠 NeuroStamp</h1>
+        <p class="lead">Invisible Watermarking & Ownership Verification</p>
+    </div>
+
+    <div class="container">
+        <div class="row g-4">
+            
+            <div class="col-md-4">
+                <div class="card h-100">
+                    <div class="card-body text-center">
+                        <h3>1. Register</h3>
+                        <p class="text-muted">Create your digital identity.</p>
+                        <input type="text" id="reg-username" class="form-control mb-3" placeholder="Enter Username">
+                        <button onclick="registerUser()" class="btn btn-primary w-100">Create ID</button>
+                        <div id="reg-status" class="mt-2 fw-bold text-success"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-4">
+                <div class="card h-100">
+                    <div class="card-body text-center">
+                        <h3>2. Stamp Image</h3>
+                        <p class="text-muted">Embed your invisible ID.</p>
+                        <input type="text" id="stamp-username" class="form-control mb-2" placeholder="Your Username">
+                        <input type="file" id="stamp-file" class="form-control mb-3">
+                        <button onclick="stampImage()" class="btn btn-primary w-100">Stamp & Download</button>
+                        <a id="download-link" class="btn btn-success w-100 mt-3 d-none" download>Download Image</a>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-4">
+                <div class="card h-100">
+                    <div class="card-body text-center">
+                        <h3>3. Verify Owner</h3>
+                        <p class="text-muted">Check suspicious images.</p>
+                        <input type="text" id="verify-username" class="form-control mb-2" placeholder="Claimed Owner">
+                        <input type="file" id="verify-file" class="form-control mb-3">
+                        <button onclick="verifyImage()" class="btn btn-outline-dark w-100">Analyze Image</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="result-area" class="alert alert-info text-center">
+            <h4 id="verify-title">Analysis Result</h4>
+            <p id="verify-message" class="fs-5"></p>
+        </div>
+    </div>
+
+    <script>
+        async function registerUser() {
+            let username = document.getElementById('reg-username').value;
+            let formData = new FormData();
+            formData.append("username", username);
+
+            let response = await fetch('/register', { method: 'POST', body: formData });
+            let data = await response.json();
+            document.getElementById('reg-status').innerText = data.message;
+        }
+
+        async function stampImage() {
+            let username = document.getElementById('stamp-username').value;
+            let fileInput = document.getElementById('stamp-file');
+            
+            let formData = new FormData();
+            formData.append("username", username);
+            formData.append("file", fileInput.files[0]);
+
+            let response = await fetch('/stamp', { method: 'POST', body: formData });
+            let data = await response.json();
+
+            if(data.status === "success") {
+                let link = document.getElementById('download-link');
+                link.href = data.download_url;
+                link.classList.remove('d-none');
+                link.innerText = "Download Protected Image ⬇️";
+            } else {
+                alert("Error: " + data.error);
+            }
+        }
+
+        async function verifyImage() {
+            let username = document.getElementById('verify-username').value;
+            let fileInput = document.getElementById('verify-file');
+            
+            let formData = new FormData();
+            formData.append("username", username);
+            formData.append("file", fileInput.files[0]);
+
+            let response = await fetch('/verify', { method: 'POST', body: formData });
+            let data = await response.json();
+            
+            let resultArea = document.getElementById('result-area');
+            let message = document.getElementById('verify-message');
+            
+            resultArea.style.display = 'block';
+            if(data.is_match) {
+                resultArea.className = "alert alert-success text-center";
+                message.innerText = "✅ CONFIRMED: This image belongs to " + data.owner;
+            } else {
+                resultArea.className = "alert alert-danger text-center";
+                message.innerText = "❌ WARNING: Signature Mismatch. Fake or altered image.";
+            }
+        }
+    </script>
+</body>
+</html>
