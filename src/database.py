@@ -11,8 +11,7 @@ engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# 2. ENCRYPTION SETUP
-# We generate a key file so the encryption stays consistent across restarts.
+# 2. ENCRYPTION SETUP (For Watermark Keys)
 KEY_FILE = "secret.key"
 
 def load_key():
@@ -32,21 +31,19 @@ CIPHER_SUITE = Fernet(load_key())
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True) # Login Name
-    user_uid = Column(String, unique=True, index=True) # PUBLIC ID (Random UUID)
+    username = Column(String, unique=True, index=True)
+    hashed_password = Column(String)  # <--- NEW: Stores the password hash
+    user_uid = Column(String, unique=True, index=True)
     
-    # STORED AS ENCRYPTED BYTES (Hackers see garbage data here)
+    # STORED AS ENCRYPTED BYTES
     encrypted_key_data = Column(LargeBinary, nullable=True) 
 
     def set_key_data(self, data_list):
-        """Encrypts list of coefficients before storing"""
         if data_list is None: return
         json_str = json.dumps(data_list)
-        # Encrypt the string to bytes
         self.encrypted_key_data = CIPHER_SUITE.encrypt(json_str.encode())
 
     def get_key_data(self):
-        """Decrypts data back to list"""
         if not self.encrypted_key_data: return None
         try:
             decrypted_json = CIPHER_SUITE.decrypt(self.encrypted_key_data).decode()
@@ -59,7 +56,7 @@ class ImageRegistry(Base):
     __tablename__ = "image_registry"
     id = Column(Integer, primary_key=True, index=True)
     image_hash = Column(String, unique=True, index=True)
-    owner_uid = Column(String) # Stores the UUID, not the name
+    owner_uid = Column(String)
 
 def init_db():
     Base.metadata.create_all(bind=engine)

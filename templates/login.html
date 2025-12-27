@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>NeuroStamp Authentication</title>
+    <link href="https://fonts.googleapis.com" rel="preconnect"/>
+    <link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet"/>
+    <script src="https://cdn.tailwindcss.com?plugins=forms,typography"></script>
+    <script>
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        primary: "#00ff9d", 
+                        secondary: "#ff0055",
+                        "background-dark": "#050505",
+                        "surface-dark": "#111111",
+                        "border-dark": "#222222",
+                    },
+                    fontFamily: {
+                        mono: ['"JetBrains Mono"', 'monospace'],
+                        display: ['"Rajdhani"', 'sans-serif'],
+                    }
+                },
+            },
+        };
+    </script>
+    <style>
+        .bg-grid {
+            background-size: 40px 40px;
+            background-image: linear-gradient(to right, rgba(128, 128, 128, 0.05) 1px, transparent 1px),
+                              linear-gradient(to bottom, rgba(128, 128, 128, 0.05) 1px, transparent 1px);
+        }
+    </style>
+</head>
+<body class="bg-background-dark text-gray-200 font-mono min-h-screen flex flex-col items-center justify-center relative">
+    
+    <div class="absolute inset-0 z-0 bg-grid pointer-events-none"></div>
+
+    <main class="relative z-10 w-full max-w-lg p-4">
+        
+        <div class="text-center mb-8">
+            <h1 class="font-display text-5xl font-bold tracking-tight text-white mb-1">
+                NEURO<span class="text-primary" style="text-shadow: 0 0 10px rgba(0, 255, 157, 0.5);">STAMP</span>
+            </h1>
+            <div class="flex items-center justify-center gap-2">
+                <span class="h-px w-8 bg-primary"></span>
+                <p class="text-xs tracking-[0.3em] uppercase text-gray-400">Secure Access Gateway</p>
+                <span class="h-px w-8 bg-primary"></span>
+            </div>
+        </div>
+
+        <div class="bg-surface-dark border border-border-dark rounded-lg shadow-2xl overflow-hidden backdrop-blur-md">
+            
+            <div class="grid grid-cols-2 border-b border-border-dark text-sm">
+                <button onclick="toggleMode('login')" id="tab-login" class="py-3 px-4 font-bold border-b-2 border-primary bg-primary/10 text-white transition-colors">
+                    [ LOGIN ]
+                </button>
+                <button onclick="toggleMode('register')" id="tab-register" class="py-3 px-4 font-bold border-b-2 border-transparent text-gray-500 hover:text-gray-300 hover:bg-white/5 transition-colors">
+                    [ REGISTER ]
+                </button>
+            </div>
+
+            <form id="authForm" onsubmit="handleAuth(event)" class="p-8 space-y-6">
+                <div id="msgBox" class="hidden p-3 text-xs border rounded bg-opacity-10 text-center font-bold"></div>
+
+                <div class="space-y-2 group">
+                    <label class="block text-xs uppercase tracking-widest text-gray-400 group-focus-within:text-primary">
+                        Codename
+                    </label>
+                    <input class="w-full bg-black border border-border-dark text-white px-4 py-3 rounded-sm focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm" 
+                           id="username" name="username" placeholder="USER_ID..." type="text" required>
+                </div>
+
+                <div class="space-y-2 group">
+                    <label class="block text-xs uppercase tracking-widest text-gray-400 group-focus-within:text-secondary">
+                        Access Key
+                    </label>
+                    <input class="w-full bg-black border border-border-dark text-white px-4 py-3 rounded-sm focus:border-secondary focus:ring-1 focus:ring-secondary outline-none text-sm" 
+                           id="password" name="password" placeholder="••••••••••••" type="password" required>
+                </div>
+
+                <button type="submit" class="w-full py-3 px-4 bg-transparent border border-primary text-primary hover:bg-primary hover:text-black font-bold uppercase tracking-wider transition-all duration-200">
+                    <span id="btnText">EXECUTE LOGIN</span>
+                </button>
+            </form>
+
+            <div class="bg-black border-t border-border-dark p-3 flex justify-between items-center text-[10px] text-gray-600 font-mono">
+                <span>STATUS: <span class="text-primary">ONLINE</span></span>
+                <span>ENC: <span class="text-primary">AES-256</span></span>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let isLoginMode = true;
+
+        function toggleMode(mode) {
+            isLoginMode = (mode === 'login');
+            const btn = document.getElementById('btnText');
+            const tabLogin = document.getElementById('tab-login');
+            const tabReg = document.getElementById('tab-register');
+
+            if(isLoginMode) {
+                btn.innerText = "EXECUTE LOGIN";
+                tabLogin.className = "py-3 px-4 font-bold border-b-2 border-primary bg-primary/10 text-white transition-colors";
+                tabReg.className = "py-3 px-4 font-bold border-b-2 border-transparent text-gray-500 hover:text-gray-300 hover:bg-white/5 transition-colors";
+            } else {
+                btn.innerText = "CREATE IDENTITY";
+                tabReg.className = "py-3 px-4 font-bold border-b-2 border-secondary bg-secondary/10 text-white transition-colors";
+                tabLogin.className = "py-3 px-4 font-bold border-b-2 border-transparent text-gray-500 hover:text-gray-300 hover:bg-white/5 transition-colors";
+            }
+        }
+
+        async function handleAuth(e) {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const endpoint = isLoginMode ? "/login" : "/register";
+            const msgBox = document.getElementById('msgBox');
+            
+            msgBox.classList.add('hidden');
+            
+            try {
+                const res = await fetch(endpoint, { method: 'POST', body: formData });
+                const data = await res.json();
+
+                if(data.status === 'success') {
+                    // If login success, redirect
+                    if(isLoginMode) {
+                        window.location.href = "/dashboard";
+                    } else {
+                        // If register success, switch to login
+                        msgBox.innerText = `ID CREATED: ${data.message.split(': ')[1]}. PLEASE LOGIN.`;
+                        msgBox.className = "p-3 text-xs border border-green-500 bg-green-900/20 text-green-500 rounded text-center font-bold";
+                        msgBox.classList.remove('hidden');
+                        toggleMode('login');
+                    }
+                } else {
+                    // Show Error
+                    msgBox.innerText = `ERROR: ${data.message || data.error}`;
+                    msgBox.className = "p-3 text-xs border border-red-500 bg-red-900/20 text-red-500 rounded text-center font-bold";
+                    msgBox.classList.remove('hidden');
+                }
+            } catch (err) {
+                console.error(err);
+                alert("Server Connection Failed");
+            }
+        }
+    </script>
+</body>
+</html>

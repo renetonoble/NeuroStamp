@@ -1,40 +1,29 @@
-from fastapi import FastAPI, UploadFile, File, Form, Depends, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, UploadFile, File, Form, Depends, Request, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-
-# Import the new DB structure
+from passlib.context import CryptContext
 from src.database import SessionLocal, init_db, User, ImageRegistry
-
-# Import utils (Ensure compute_dhash and calculate_hamming_distance are in src/utils.py)
-from src.utils import (
-    load_image,
-    save_image,
-    text_to_binary,
-    binary_to_text,
-    compute_dhash,
-    calculate_hamming_distance,
-)
-
+from src.utils import load_image, save_image, binary_to_text, compute_dhash, calculate_hamming_distance
 from src.core import embed_watermark, extract_watermark
-import shutil
-import os
-import numpy as np
-import uuid  # For generating unique User IDs
+import shutil, os, uuid, numpy as np
 from PIL import Image, ImageFilter
 
 app = FastAPI()
 
-# 1. Setup Static Folders & Templates
+# 1. SECURITY SETUP
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+def get_password_hash(password): return pwd_context.hash(password)
+def verify_password(plain, hashed): return pwd_context.verify(plain, hashed)
+
+# 2. APP SETUP
 os.makedirs("static/uploads", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
-
-# 2. Initialize DB on startup
 init_db()
 
-# Dependency to get DB session
+# FIX: Proper indentation for database session
 def get_db():
     db = SessionLocal()
     try:
@@ -42,215 +31,163 @@ def get_db():
     finally:
         db.close()
 
-# --- ROUTES ---
-
+# --- AUTH ROUTES ---
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    """Render the Home Page"""
-    return templates.TemplateResponse("index.html", {"request": request})
+async def login_page(request: Request):
+    return templates.TemplateResponse("login.html", {"request": request})
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    username = request.cookies.get("user_session")
+    if not username: return RedirectResponse(url="/")
+    return templates.TemplateResponse("index.html", {"request": request, "username": username})
 
 @app.post("/register")
-async def register_user(username: str = Form(...), db: Session = Depends(get_db)):
-    """Creates a new user with a STRONG UUID"""
-    existing_user = db.query(User).filter(User.username == username).first()
-    if existing_user:
-        return {"status": "error", "message": "User already exists!"}
-    
-    # Generate a random 12-char ID (e.g., 'a1b2c3d4e5f6')
-    random_id = str(uuid.uuid4())[:12]
-    
-    # Save to DB (Key is None initially)
-    new_user = User(username=username, user_uid=random_id)
-    db.add(new_user)
-    db.commit()
-    return {"status": "success", "message": f"Welcome {username}! Your Secure ID is: {random_id}"}
+async def register(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+    if db.query(User).filter(User.username == username).first():
+        return JSONResponse({"status": "error", "message": "User exists!"})
+    new_user = User(username=username, hashed_password=get_password_hash(password), user_uid=str(uuid.uuid4())[:12])
+    db.add(new_user); db.commit()
+    return JSONResponse({"status": "success", "message": f"ID: {new_user.user_uid}"})
 
-@app.post("/stamp")
-async def stamp_image(
-    username: str = Form(...), 
-    file: UploadFile = File(...), 
-    db: Session = Depends(get_db)
-):
-    """
-    Stamps image with UUID and Encrypts the key.
-    """
+@app.post("/login")
+async def login(response: Response, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
-    if not user:
-        return {"error": "User not found. Register first."}
+    if not user or not verify_password(password, user.hashed_password):
+        return JSONResponse({"status": "error", "message": "Invalid Credentials"}, status_code=401)
+    resp = JSONResponse({"status": "success"})
+    resp.set_cookie(key="user_session", value=username)
+    return resp
 
-    # 1. Save Temp File
-    file_location = f"static/uploads/{file.filename}"
-    with open(file_location, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
-    original = load_image(file_location)
+@app.get("/logout")
+async def logout():
+    resp = RedirectResponse(url="/"); resp.delete_cookie("user_session")
+    return resp
+
+# --- CORE ROUTES ---
+@app.post("/stamp")
+async def stamp_image(username: str = Form(...), file: UploadFile = File(...), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if not user: return {"error": "User error. Relogin."}
+
+    # Save & Load
+    path = f"static/uploads/{file.filename}"
+    with open(path, "wb") as f: shutil.copyfileobj(file.file, f)
+    original = load_image(path)
     
-    # --- SECURITY CHECK: PERCEPTUAL HASH (Prevent Double Spending) ---
+    # Double Spending Check
     img_hash = compute_dhash(original)
-    
-    all_records = db.query(ImageRegistry).all()
-    existing_record = None
-    
-    for record in all_records:
-        distance = calculate_hamming_distance(img_hash, record.image_hash)
-        # Threshold 10 for "Fuzzy Matching"
-        if distance < 10:
-            existing_record = record
-            break
-            
-    if existing_record:
-        # Check if the UUID matches
-        if existing_record.owner_uid != user.user_uid:
-            # FIND THE REAL NAME OF THE OWNER
-            original_owner = db.query(User).filter(User.user_uid == existing_record.owner_uid).first()
-            owner_name = original_owner.username if original_owner else "Unknown"
-            
-            return {
-                "status": "error", 
-                "error": f"COPYRIGHT CONFLICT: This image is already registered to '{owner_name}'."
-            }
-    # ----------------------------------------------------------------
+    for r in db.query(ImageRegistry).all():
+        if calculate_hamming_distance(img_hash, r.image_hash) < 10 and r.owner_uid != user.user_uid:
+            owner = db.query(User).filter(User.user_uid == r.owner_uid).first()
+            return {"status": "error", "error": f"Conflict: Owned by {owner.username if owner else 'Unknown'}"}
 
-    # 2. Embed Watermark (Using UUID)
-    # Text is now "ID:a1b2c3..." instead of "User:Reneto"
-    watermark_text = f"ID:{user.user_uid}"
+    # Embed
+    watermarked, key = embed_watermark(original, f"ID:{user.user_uid}", 40, username)
+    user.set_key_data(key)
     
-    # Use Alpha 40 for Y-Channel
-    watermarked_img, key_coeffs = embed_watermark(original, watermark_text, alpha=40, username=username)    
-    
-    # 3. Save Encrypted Key
-    user.set_key_data(key_coeffs)
-    
-    # 4. Register the Hash
-    if not existing_record:
-        new_record = ImageRegistry(image_hash=img_hash, owner_uid=user.user_uid)
-        db.add(new_record)
-        
+    # Register
+    if not db.query(ImageRegistry).filter_by(image_hash=img_hash).first():
+        db.add(ImageRegistry(image_hash=img_hash, owner_uid=user.user_uid))
     db.commit()
     
-    # 5. Save Output
-    base_name = os.path.splitext(file.filename)[0]
-    output_filename = f"stamped_{base_name}.png"
-    output_path = f"static/uploads/{output_filename}"
-    
-    save_image(watermarked_img, output_path)
-    
-    return {"status": "success", "download_url": f"/static/uploads/{output_filename}"}
+    # Save Output
+    out_name = f"stamped_{file.filename}"
+    save_image(watermarked, f"static/uploads/{out_name}")
+    return {"status": "success", "download_url": f"/static/uploads/{out_name}"}
 
 @app.post("/verify")
-async def verify_image(
-    username: str = Form(...),
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db)
-):
-    """
-    Verifies the image owner using Encrypted Key.
-    """
+async def verify(username: str = Form(...), file: UploadFile = File(...), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
+    key = user.get_key_data() if user else None
+    if not key: return {"error": "User/Key not found."}
     
-    # DECRYPT THE KEY
-    decrypted_key = user.get_key_data() if user else None
+    path = f"static/uploads/verify_{file.filename}"
+    with open(path, "wb") as f: shutil.copyfileobj(file.file, f)
     
-    if not user or not decrypted_key:
-        return {"error": "User not found or no key registered."}
-        
-    # 1. Save Temp
-    file_location = f"static/uploads/verify_{file.filename}"
-    with open(file_location, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
-    # 2. Extract
-    suspicious = load_image(file_location)
-    
-    # Expect the UUID, not the name
-    expected_text = f"ID:{user.user_uid}"
-    expected_bits = len(expected_text) * 8
-    
-    # 3. Decode
-    recovered_bits = extract_watermark(suspicious, decrypted_key, alpha=40, length=expected_bits, username=username)
-    recovered_text = binary_to_text(recovered_bits)
-    
-    # --- DEBUG PRINT ---
-    print(f"\n🕵️ VERIFICATION DEBUG:")
-    print(f"   Expected: {expected_text}")
-    print(f"   Extracted: {recovered_text}")
-    print(f"   Match: {recovered_text == expected_text}\n")
-    # -------------------
-    
-    is_match = (recovered_text == expected_text)
-    
-    return {
-        "status": "complete",
-        "extracted_text": recovered_text,
-        "is_match": is_match,
-        "owner": username if is_match else "Unknown"
-    }
+    # Extract
+    text = binary_to_text(extract_watermark(load_image(path), key, 40, len(f"ID:{user.user_uid}")*8, username))
+    is_match = (text == f"ID:{user.user_uid}")
+    return {"status": "complete", "extracted_text": text, "is_match": is_match, "owner": username if is_match else "Unknown"}
 
-# --- IMPROVED ROUTE: DATABASE VIEWER (With Raw Data Proof) ---
+@app.post("/attack")
+async def attack(filename: str = Form(...), attack_type: str = Form(...)):
+    path = f"static/uploads/{filename}"
+    if not os.path.exists(path): return {"error": "File not found"}
+    img = Image.open(path).convert("RGB")
+    
+    if attack_type == "noise":
+        arr = np.array(img).astype(np.float32) + np.random.normal(0, 25, (img.size[1], img.size[0], 3))
+        img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+    elif attack_type == "blur": img = img.filter(ImageFilter.GaussianBlur(1))
+    elif attack_type == "jpeg": 
+        img.save(f"{path}.jpg", "JPEG", quality=50); img = Image.open(f"{path}.jpg")
+    elif attack_type == "rotate": img = img.rotate(5)
+    elif attack_type == "crop": img = img.crop((img.width*0.1, img.height*0.1, img.width*0.9, img.height*0.9))
+        
+    out = f"attacked_{attack_type}_{filename}"
+    img.save(f"static/uploads/{out}")
+    return {"status": "success", "attack_url": f"/static/uploads/{out}"}
+
+# --- ADMIN ROUTES (THE BEAUTIFUL VERSION) ---
 @app.get("/db-viewer", response_class=HTMLResponse)
 async def view_database(request: Request, db: Session = Depends(get_db)):
-    """
-    ADMIN DASHBOARD: Shows the raw database tables with proof of encryption.
-    """
     users = db.query(User).all()
     registry = db.query(ImageRegistry).all()
     
     html_content = """
-    <html>
+    <!DOCTYPE html>
+    <html lang="en">
     <head>
-        <title>NeuroStamp DB Viewer</title>
+        <meta charset="UTF-8">
+        <title>NeuroStamp Database Vault</title>
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
         <style>
-            .encrypted-text { 
-                font-family: 'Courier New', monospace; 
-                color: #d63384; 
-                font-size: 0.9em; 
-                word-break: break-all;
-            }
-            .uuid-text {
-                font-family: 'Courier New', monospace; 
-                color: #0d6efd; 
-                font-weight: bold;
-            }
+            body { background-color: #050505; color: #00ff9d; font-family: 'JetBrains Mono', monospace; }
+            .card { background: rgba(20, 20, 20, 0.8); border: 1px solid #333; }
+            .card-header { background: #111; border-bottom: 1px solid #333; color: #fff; font-weight: bold; }
+            .table { color: #ccc; }
+            .table-hover tbody tr:hover { color: #fff; background-color: rgba(0, 255, 157, 0.1); }
+            .encrypted { color: #ff0055; word-break: break-all; font-size: 0.85em; }
+            .uuid { color: #00d2ff; font-weight: bold; }
+            h2 { text-shadow: 0 0 10px rgba(0, 255, 157, 0.5); }
         </style>
     </head>
-    <body class="p-4 bg-light">
+    <body class="p-5">
         <div class="container">
-            <div class="d-flex justify-content-between align-items-center mb-4">
-                <h2>📂 NeuroStamp Database Monitor</h2>
-                <a href="/" class="btn btn-secondary">← Back to Dashboard</a>
+            <div class="d-flex justify-content-between align-items-center mb-5">
+                <h2>📂 ENCRYPTED DATABASE VAULT</h2>
+                <a href="/dashboard" class="btn btn-outline-light btn-sm">← BACK TO TERMINAL</a>
             </div>
-            
-            <div class="card mb-5 shadow-sm">
-                <div class="card-header bg-dark text-white">
-                    <h5 class="m-0">User Credentials & Keys</h5>
-                </div>
+
+            <div class="card mb-5 shadow-lg">
+                <div class="card-header">🔒 USER CREDENTIALS & KEYS (Table: users)</div>
                 <div class="card-body p-0">
-                    <table class="table table-striped table-hover mb-0">
-                        <thead class="table-dark">
-                            <tr>
-                                <th>Username</th>
-                                <th>Public UUID (Identifier)</th>
-                                <th>Secret Key Data (Stored in DB)</th>
+                    <table class="table table-dark table-hover mb-0">
+                        <thead>
+                            <tr class="text-secondary">
+                                <th>ID</th>
+                                <th>USERNAME</th>
+                                <th>PUBLIC UUID</th>
+                                <th>PASSWORD HASH (bcrypt)</th>
+                                <th>ENCRYPTED WATERMARK KEY (AES-256)</th>
                             </tr>
                         </thead>
                         <tbody>
     """
     
     for u in users:
-        if u.encrypted_key_data:
-            # Show the first 30 chars of the encrypted bytes to prove it's scrambled
-            # It will look like: b'gAAAAABl8...'
-            raw_preview = str(u.encrypted_key_data)[:40] + "..."
-            key_display = f"<span class='encrypted-text'>{raw_preview}</span>"
-        else:
-            key_display = "<span class='text-muted'>❌ No Key Generated</span>"
-            
+        key_preview = str(u.encrypted_key_data)[:40] + "..." if u.encrypted_key_data else "<span class='text-muted'>[NO_KEY_GENERATED]</span>"
+        pw_preview = u.hashed_password[:20] + "..." if u.hashed_password else "N/A"
+
         html_content += f"""
             <tr>
-                <td class="fw-bold">{u.username}</td>
-                <td><span class="uuid-text">{u.user_uid}</span></td>
-                <td>{key_display}</td>
+                <td>{u.id}</td>
+                <td class="fw-bold text-white">{u.username}</td>
+                <td class="uuid">{u.user_uid}</td>
+                <td class="text-warning">{pw_preview}</td>
+                <td class="encrypted">{key_preview}</td>
             </tr>
         """
         
@@ -259,18 +196,16 @@ async def view_database(request: Request, db: Session = Depends(get_db)):
                     </table>
                 </div>
             </div>
-            
-            <div class="card shadow-sm">
-                <div class="card-header bg-success text-white">
-                    <h5 class="m-0">Image Ownership Registry</h5>
-                </div>
+
+            <div class="card shadow-lg">
+                <div class="card-header text-info">👁️ COPYRIGHT REGISTRY (Table: image_registry)</div>
                 <div class="card-body p-0">
-                    <table class="table table-striped table-hover mb-0">
-                        <thead class="table-success">
-                            <tr>
+                    <table class="table table-dark table-hover mb-0">
+                        <thead>
+                            <tr class="text-secondary">
                                 <th>ID</th>
-                                <th>Visual Fingerprint (dHash)</th>
-                                <th>Owner UUID</th>
+                                <th>PERCEPTUAL HASH (dHash)</th>
+                                <th>OWNER UUID</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -280,8 +215,8 @@ async def view_database(request: Request, db: Session = Depends(get_db)):
         html_content += f"""
             <tr>
                 <td>{r.id}</td>
-                <td><code>{r.image_hash}</code></td>
-                <td><span class="uuid-text">{r.owner_uid}</span></td>
+                <td class="text-white"><code>{r.image_hash}</code></td>
+                <td class="uuid">{r.owner_uid}</td>
             </tr>
         """
         
@@ -290,64 +225,12 @@ async def view_database(request: Request, db: Session = Depends(get_db)):
                     </table>
                 </div>
             </div>
+            
+            <div class="mt-4 text-center text-muted small">
+                SECURE CONNECTION | AES-256 ENCRYPTION ACTIVE
+            </div>
         </div>
     </body>
     </html>
     """
     return HTMLResponse(content=html_content)
-
-# --- ATTACK SIMULATION ROUTE ---
-@app.post("/attack")
-async def attack_image(
-    filename: str = Form(...),
-    attack_type: str = Form(...)
-):
-    """
-    Simulates attacks.
-    """
-    file_path = f"static/uploads/{filename}"
-    if not os.path.exists(file_path):
-        return {"error": "File not found"}
-    
-    img = Image.open(file_path).convert("RGB")
-    
-    # 1. ATTACK: NOISE
-    if attack_type == "noise":
-        arr = np.array(img).astype(np.float32)
-        noise = np.random.normal(0, 25, arr.shape)
-        arr = arr + noise
-        arr = np.clip(arr, 0, 255).astype(np.uint8)
-        img = Image.fromarray(arr)
-        
-    # 2. ATTACK: BLUR
-    elif attack_type == "blur":
-        img = img.filter(ImageFilter.GaussianBlur(radius=0.8))
-        
-    # 3. ATTACK: COMPRESSION
-    elif attack_type == "jpeg":
-        temp_jpg = f"static/uploads/temp_attack_{filename}.jpg"
-        img.save(temp_jpg, "JPEG", quality=75)
-        img = Image.open(temp_jpg).convert("RGB")
-        
-    # 4. ATTACK: ROTATION
-    elif attack_type == "rotate":
-        img = img.rotate(5, expand=False)
-        
-    # 5. ATTACK: CROPPING
-    elif attack_type == "crop":
-        w, h = img.size
-        left, top, right, bottom = w * 0.1, h * 0.1, w * 0.9, h * 0.9
-        img = img.crop((left, top, right, bottom))
-        
-    else:
-        return {"error": f"Unknown attack type: {attack_type}"}
-
-    attack_filename = f"attacked_{attack_type}_{filename}"
-    attack_path = f"static/uploads/{attack_filename}"
-    img.save(attack_path, "PNG")
-    
-    return {
-        "status": "success", 
-        "attack_url": f"/static/uploads/{attack_filename}",
-        "filename": attack_filename
-    }

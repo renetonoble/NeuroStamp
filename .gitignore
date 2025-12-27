@@ -1,11 +1,31 @@
+# --- Security / Sensitive Data ---
+secret.key              # MASTER ENCRYPTION KEY (Critical to ignore)
+.env                    # Environment variables
+*.db                    # SQLite databases
+*.db-journal            # Database temp files
+
+# --- Environments ---
 venv/
+env/
+.venv/
+
+# --- Python & Cache ---
 __pycache__/
-*.pyc
-*.db
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# --- Media & Assets ---
 static/uploads/*
 !static/uploads/.gitkeep
-.DS_Store
 /*.png
 /*.jpg
+/*.jpeg
 /*.json
 !/assets/
+
+# --- IDEs & System ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
