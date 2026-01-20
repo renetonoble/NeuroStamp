@@ -6,3 +6,7 @@ matplotlib
 fastapi
 uvicorn
 python-multipart
+sqlalchemy
+passlib[bcrypt]
+cryptography
+jinja2

@@ -19,7 +19,7 @@ def load_image(path):
     
     # Trim the array if needed
     if new_h != h or new_w != w:
-        print(f"   ✂️ Trimming image from {h}x{w} to {new_h}x{new_w} (Even dims required)")
+        print(f"   [TRIM] Trimming image from {h}x{w} to {new_h}x{new_w} (Even dims required)")
         arr = arr[:new_h, :new_w, :]
         
     return arr
@@ -31,7 +31,7 @@ def save_image(array, path):
     array = np.clip(array, 0, 255).astype(np.uint8)
     img = Image.fromarray(array)
     img.save(path)
-    print(f"💾 Image saved to {path}")
+    print(f"[SAVE] Image saved to {path}")
 
 def text_to_binary(text):
     return "".join(format(ord(c), '08b') for c in text)

@@ -3,7 +3,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from passlib.context import CryptContext
+import bcrypt
 from src.database import SessionLocal, init_db, User, ImageRegistry
 from src.utils import load_image, save_image, binary_to_text, compute_dhash, calculate_hamming_distance
 from src.core import embed_watermark, extract_watermark
@@ -13,9 +13,13 @@ from PIL import Image, ImageFilter
 app = FastAPI()
 
 # 1. SECURITY SETUP
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-def get_password_hash(password): return pwd_context.hash(password)
-def verify_password(plain, hashed): return pwd_context.verify(plain, hashed)
+def get_password_hash(password: str) -> str:
+    """Hash password using bcrypt"""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(plain: str, hashed: str) -> bool:
+    """Verify password against bcrypt hash"""
+    return bcrypt.checkpw(plain.encode('utf-8'), hashed.encode('utf-8'))
 
 # 2. APP SETUP
 os.makedirs("static/uploads", exist_ok=True)
@@ -106,7 +110,7 @@ async def verify(username: str = Form(...), file: UploadFile = File(...), db: Se
     with open(path, "wb") as f: shutil.copyfileobj(file.file, f)
     
     # Extract
-    text = binary_to_text(extract_watermark(load_image(path), key, 40, len(f"ID:{user.user_uid}")*8, username))
+    text = extract_watermark(load_image(path), key, 40, len(f"ID:{user.user_uid}")*8, username)
     is_match = (text == f"ID:{user.user_uid}")
     return {"status": "complete", "extracted_text": text, "is_match": is_match, "owner": username if is_match else "Unknown"}
 
@@ -158,7 +162,10 @@ async def view_database(request: Request, db: Session = Depends(get_db)):
         <div class="container">
             <div class="d-flex justify-content-between align-items-center mb-5">
                 <h2>📂 ENCRYPTED DATABASE VAULT</h2>
-                <a href="/dashboard" class="btn btn-outline-light btn-sm">← BACK TO TERMINAL</a>
+                <div class="d-flex gap-2">
+                     <a href="/visualize" class="btn btn-info btn-sm fw-bold">👁️ VISUALIZATION ENGINE</a>
+                     <a href="/dashboard" class="btn btn-outline-light btn-sm">↻ REFRESH</a>
+                </div>
             </div>
 
             <div class="card mb-5 shadow-lg">
@@ -234,3 +241,45 @@ async def view_database(request: Request, db: Session = Depends(get_db)):
     </html>
     """
     return HTMLResponse(content=html_content)
+
+# VISUALIZATION ENGINE ENDPOINTS
+@app.get("/visualize", response_class=HTMLResponse)
+async def visualize_page(request: Request):
+    user_cookie = request.cookies.get("user_session")
+    if not user_cookie: return RedirectResponse(url="/")
+    return templates.TemplateResponse("visualize.html", {"request": request, "username": user_cookie})
+
+from src.visualizer import generate_visualizations, generate_diff_map
+
+@app.post("/process-vis", response_class=HTMLResponse)
+async def process_visualization(username: str = Form(...), file: UploadFile = File(...), db: Session = Depends(get_db)):
+    # 1. Save Original
+    os.makedirs("static/vis", exist_ok=True)
+    file_path = f"static/vis/demo_original_{uuid.uuid4().hex[:8]}.jpg"
+    with open(file_path, "wb") as f: shutil.copyfileobj(file.file, f)
+    
+    # 2. Generate Watermarked Version
+    original = load_image(file_path)
+    user = db.query(User).filter(User.username == username).first()
+    wm_img, key = embed_watermark(original, f"ID:{user.user_uid}", 100, username)
+    
+    wm_path = file_path.replace("original", "watermarked")
+    save_image(wm_img, wm_path)
+    
+    # 3. Generate Visualizations (DWT, Grid, SVD)
+    vis_assets = generate_visualizations(file_path, "static/vis")
+    
+    # 4. Generate Diff Map
+    vis_diff = generate_diff_map(file_path, wm_path, "static/vis")
+    
+    return templates.TemplateResponse("visualize.html", {
+        "request": {},
+        "username": username,
+        "processed": True,
+        "original_url": "/" + file_path,
+        "watermarked_url": "/" + wm_path,
+        "vis_dwt": vis_assets["dwt"],
+        "vis_grid": vis_assets["grid"],
+        "vis_svd": vis_assets["svd"],
+        "vis_diff": vis_diff
+    })

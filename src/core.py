@@ -1,153 +1,152 @@
 import pywt
 import numpy as np
 from PIL import Image
-from src.utils import get_scrambled_indices
 
-# --- TRANSFORM LOGIC ---
-def apply_dwt(matrix):
-    return pywt.dwt2(matrix, 'haar')
+# --- HELPER FUNCTIONS ---
 
-def inverse_dwt(coeffs):
-    return pywt.idwt2(coeffs, 'haar')
+def text_to_binary(text):
+    """Convert text string to binary string."""
+    return "".join(format(ord(c), '08b') for c in text)
 
-# --- BIPOLAR ROBUST ENGINE (Level 2 + Y-Channel + Sign Detection) ---
+def binary_to_text(binary):
+    """Convert binary string to text."""
+    # Split into 8-bit chunks
+    chars = []
+    for i in range(0, len(binary), 8):
+        byte = binary[i:i+8]
+        if len(byte) < 8: break
+        try:
+            chars.append(chr(int(byte, 2)))
+        except ValueError:
+            pass
+    return "".join(chars)
 
-def embed_channel(channel_matrix, binary_watermark, alpha=30, secret_key="default"):
+# --- DWT-SVD ENGINE (BLOCK BASED) ---
+
+def embed_watermark(image_array, watermark_text, alpha=50, username="default"):
     """
-    SCIENTIFIC UPGRADE:
-    1. Uses Level 2 DWT (Mid-Frequencies).
-    2. Uses BIPOLAR embedding (+Alpha for 1, -Alpha for 0).
-       This centers the signal around 0, making it robust to fading.
+    Embeds watermark using Block-Based DWT-SVD.
+    1. DWT Level 1 -> LL Subband.
+    2. Divide LL into 4x4 blocks.
+    3. For each block: SVD -> Embed bit in S[0].
     """
-    # 1. Level 1 DWT
-    LL1, (LH1, HL1, HH1) = apply_dwt(channel_matrix)
-    
-    # 2. Level 2 DWT
-    LL2, (LH2, HL2, HH2) = apply_dwt(LL1)
-    
-    # Target: LH2 (Vertical Mid-Frequencies)
-    flat_target = LH2.flatten()
-    original_coeffs = flat_target.copy()
-    
-    # --- REDUNDANCY ---
-    max_slots = len(flat_target)
-    scrambled_indices = get_scrambled_indices(max_slots, secret_key)
-    
-    start_pos = 100
-    available_space = max_slots - start_pos
-    num_repeats = available_space // len(binary_watermark)
-    if num_repeats < 1: num_repeats = 1
-    
-    full_message = binary_watermark * num_repeats
-    
-    # --- BIPOLAR EMBEDDING ---
-    for i in range(len(full_message)):
-        if start_pos + i >= len(scrambled_indices): break
-        target_idx = scrambled_indices[start_pos + i]
-        
-        # KEY CHANGE: Bipolar Logic
-        if full_message[i] == '1':
-            flat_target[target_idx] += alpha  # Boost
-        else:
-            flat_target[target_idx] -= alpha  # Suppress
-            
-    # Reshape
-    modified_LH2 = flat_target.reshape(LH2.shape)
-    
-    # --- RECONSTRUCTION (With Dimension Fix) ---
-    modified_LL1 = inverse_dwt((LL2, (modified_LH2, HL2, HH2)))
-    
-    # Crop to match Level 1 parent
-    h, w = LH1.shape
-    modified_LL1 = modified_LL1[:h, :w]
-    
-    watermarked_channel = inverse_dwt((modified_LL1, (LH1, HL1, HH1)))
-    
-    return watermarked_channel, original_coeffs
-
-def extract_channel(channel_matrix, key, alpha=30, length=128, secret_key="default"):
-    """
-    SCIENTIFIC UPGRADE:
-    Uses Sign-Based Detection (Threshold = 0).
-    Robust against signal fading (Blur/JPEG).
-    """
-    LL1, (LH1, HL1, HH1) = apply_dwt(channel_matrix)
-    LL2, (LH2, HL2, HH2) = apply_dwt(LL1)
-    
-    flat_target = LH2.flatten()
-    
-    # --- VOTING ---
-    max_slots = len(flat_target)
-    scrambled_indices = get_scrambled_indices(max_slots, secret_key)
-    
-    start_pos = 100
-    available_space = max_slots - start_pos
-    num_repeats = available_space // length
-    if num_repeats < 1: num_repeats = 1
-    
-    # vote_score[i] will store the sum of differences
-    # If sum > 0 -> Bit 1. If sum < 0 -> Bit 0.
-    vote_score = [0.0] * length
-    
-    for r in range(num_repeats):
-        for i in range(length):
-            abs_idx = start_pos + (r * length) + i
-            if abs_idx >= len(scrambled_indices): break
-            target_idx = scrambled_indices[abs_idx]
-            
-            try:
-                # Calculate difference
-                diff = flat_target[target_idx] - key[target_idx]
-                # Accumulate the raw signal (Soft Voting)
-                vote_score[i] += diff
-            except IndexError:
-                pass
-                
-    # --- DECISION ---
-    extracted_bits = ""
-    for score in vote_score:
-        # KEY CHANGE: Zero Threshold
-        # Since we did +Alpha and -Alpha, the average is 0.
-        # Anything positive is likely a 1, even if faded.
-        if score > 0:
-            extracted_bits += "1"
-        else:
-            extracted_bits += "0"
-            
-    return extracted_bits
-
-# --- PUBLIC FUNCTIONS (Switched to Y-Channel) ---
-
-def embed_watermark(image_array, watermark_text, alpha=30, username="default"):
-    """
-    Converts to YCbCr and embeds in Luminance (Y).
-    Alpha is lower (30) because Y is more sensitive, but Bipolar logic makes it robust.
-    """
-    # 1. Convert Array -> Image -> YCbCr
+    # 1. Convert to YCbCr and extract Y
     img_pil = Image.fromarray(image_array.astype('uint8')).convert('YCbCr')
     y, cb, cr = img_pil.split()
+    y_array = np.array(y).astype(float)
+
+    # 2. DWT Level 1
+    coeffs = pywt.dwt2(y_array, 'haar')
+    LL, (LH, HL, HH) = coeffs
     
-    y_array = np.array(y)
+    # 3. Prepare Blocks
+    h, w = LL.shape
+    block_size = 4
+    # Ensure divisible by block_size
+    h = (h // block_size) * block_size
+    w = (w // block_size) * block_size
+    LL = LL[:h, :w]
     
-    # 2. Embed in Y Channel
-    binary_msg = "".join(format(ord(c), '08b') for c in watermark_text)
-    watermarked_y_array, key_coeffs = embed_channel(y_array, binary_msg, alpha, secret_key=username)
+    # 4. Prepare Watermark
+    binary_msg = text_to_binary(watermark_text)
+    num_blocks = (h // block_size) * (w // block_size)
     
-    # 3. Merge Back
-    watermarked_y_array = np.clip(watermarked_y_array, 0, 255).astype('uint8')
-    watermarked_y = Image.fromarray(watermarked_y_array)
+    if len(binary_msg) > num_blocks:
+        print(f"Warning: Truncating message. Capacity: {num_blocks} bits.")
+        binary_msg = binary_msg[:num_blocks]
+        
+    s0_originals = []
+    
+    msg_idx = 0
+    # Iterate Blocks
+    for r in range(0, h, block_size):
+        for c in range(0, w, block_size):
+            if msg_idx >= len(binary_msg): break
+            
+            block = LL[r:r+block_size, c:c+block_size]
+            U, S, Vt = np.linalg.svd(block, full_matrices=False)
+            
+            # Store original S[0] for extraction key
+            s0_originals.append(float(S[0]))
+            
+            # Embed Bit into S[0]
+            bit = int(binary_msg[msg_idx])
+            # Rule: If bit=1, add alpha. If bit=0, do nothing (or sub alpha? No, simpler is better).
+            # Let's add alpha * bit.
+            S[0] = S[0] + (alpha * bit)
+            
+            # Reconstruct Block
+            block_new = np.dot(U, np.dot(np.diag(S), Vt))
+            LL[r:r+block_size, c:c+block_size] = block_new
+            
+            msg_idx += 1
+            
+    # 5. Inverse DWT
+    # Be careful: LL was cropped. We need to match LH, HL, HH size.
+    # Usually LH, HL, HH are same size as original LL.
+    # If we cropped LL, we must crop others too.
+    LH = LH[:h, :w]; HL = HL[:h, :w]; HH = HH[:h, :w]
+    
+    coeffs_new = (LL, (LH, HL, HH))
+    y_watermarked = pywt.idwt2(coeffs_new, 'haar')
+    
+    # 6. Merge
+    y_watermarked = np.clip(y_watermarked, 0, 255).astype('uint8')
+    watermarked_y = Image.fromarray(y_watermarked)
+    
+    # Resize cb, cr if needed (because we cropped LL/LH..)
+    # The output image will be slightly smaller if we cropped.
+    # DWT output is usually 2x internal dims.
+    out_h, out_w = y_watermarked.shape
+    cb = cb.resize((out_w, out_h)); cr = cr.resize((out_w, out_h))
     
     final_img = Image.merge('YCbCr', (watermarked_y, cb, cr)).convert('RGB')
     
-    return np.array(final_img), key_coeffs.tolist()
+    return np.array(final_img), s0_originals
 
-def extract_watermark(image_array, key, alpha=30, length=None, username="default"):
+def extract_watermark(image_array, key, alpha=50, length=None, username="default"):
     """
-    Extracts from Y Channel.
+    Extracts watermark using Block-Based DWT-SVD and Original S[0] Key.
     """
-    # 1. Convert -> YCbCr -> Extract Y
+    # 1. Setup
     img_pil = Image.fromarray(image_array.astype('uint8')).convert('YCbCr')
     y, cb, cr = img_pil.split()
-    y_array = np.array(y)
+    y_array = np.array(y).astype(float)
     
-    return extract_channel(y_array, key, alpha, length, secret_key=username)
+    # 2. DWT
+    coeffs = pywt.dwt2(y_array, 'haar')
+    LL, (LH, HL, HH) = coeffs
+    
+    h, w = LL.shape
+    block_size = 4
+    h = (h // block_size) * block_size
+    w = (w // block_size) * block_size
+    
+    s0_originals = key # List of floats
+    bits = ""
+    idx = 0
+    
+    for r in range(0, h, block_size):
+        for c in range(0, w, block_size):
+            if idx >= len(s0_originals): break
+            
+            block = LL[r:r+block_size, c:c+block_size]
+            U, S, Vt = np.linalg.svd(block, full_matrices=False)
+            
+            s_extracted = S[0]
+            s_original = s0_originals[idx]
+            
+            diff = s_extracted - s_original
+            
+            # Logic: If diff is close to alpha -> 1. If close to 0 -> 0.
+            # Threshold = alpha / 2
+            if diff > (alpha / 2):
+                bits += "1"
+            else:
+                bits += "0"
+            idx += 1
+            
+    if length:
+        bits = bits[:length]
+        
+    return binary_to_text(bits)
