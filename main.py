@@ -70,7 +70,12 @@ async def logout():
 
 # --- CORE ROUTES ---
 @app.post("/stamp")
-async def stamp_image(username: str = Form(...), file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def stamp_image(
+    username: str = Form(...),
+    file: UploadFile = File(...),
+    backend: str = Form("dwt_svd_v1"),
+    db: Session = Depends(get_db),
+):
     user = db.query(User).filter(User.username == username).first()
     if not user: return {"error": "User error. Relogin."}
 
@@ -87,7 +92,14 @@ async def stamp_image(username: str = Form(...), file: UploadFile = File(...), d
             return {"status": "error", "error": f"Conflict: Owned by {owner.username if owner else 'Unknown'}"}
 
     # Embed
-    watermarked, key = embed_watermark(original, f"ID:{user.user_uid}", 40, username)
+    watermarked, key = embed_watermark(
+        original,
+        f"ID:{user.user_uid}",
+        40,
+        username,
+        backend=backend,
+        params={"backend": backend},
+    )
     user.set_key_data(key)
     
     # Register
@@ -98,10 +110,19 @@ async def stamp_image(username: str = Form(...), file: UploadFile = File(...), d
     # Save Output
     out_name = f"stamped_{file.filename}"
     save_image(watermarked, f"static/uploads/{out_name}")
-    return {"status": "success", "download_url": f"/static/uploads/{out_name}"}
+    return {
+        "status": "success",
+        "backend": backend,
+        "download_url": f"/static/uploads/{out_name}",
+    }
 
 @app.post("/verify")
-async def verify(username: str = Form(...), file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def verify(
+    username: str = Form(...),
+    file: UploadFile = File(...),
+    backend: str = Form("dwt_svd_v1"),
+    db: Session = Depends(get_db),
+):
     user = db.query(User).filter(User.username == username).first()
     key = user.get_key_data() if user else None
     if not key: return {"error": "User/Key not found."}
@@ -110,9 +131,24 @@ async def verify(username: str = Form(...), file: UploadFile = File(...), db: Se
     with open(path, "wb") as f: shutil.copyfileobj(file.file, f)
     
     # Extract
-    text = extract_watermark(load_image(path), key, 40, len(f"ID:{user.user_uid}")*8, username)
+    backend_to_use = key.get("backend", backend) if isinstance(key, dict) else backend
+    text = extract_watermark(
+        load_image(path),
+        key,
+        40,
+        len(f"ID:{user.user_uid}") * 8,
+        username,
+        backend=backend_to_use,
+        params={"backend": backend_to_use},
+    )
     is_match = (text == f"ID:{user.user_uid}")
-    return {"status": "complete", "extracted_text": text, "is_match": is_match, "owner": username if is_match else "Unknown"}
+    return {
+        "status": "complete",
+        "backend": backend_to_use,
+        "extracted_text": text,
+        "is_match": is_match,
+        "owner": username if is_match else "Unknown",
+    }
 
 @app.post("/attack")
 async def attack(filename: str = Form(...), attack_type: str = Form(...)):
