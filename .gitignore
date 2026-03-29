@@ -19,6 +19,7 @@ __pycache__/
 static/uploads/*
 static/vis/*
 !static/uploads/.gitkeep
+!static/vis/.gitkeep
 /*.png
 /*.jpg
 /*.jpeg
@@ -29,4 +30,5 @@ static/vis/*
 .vscode/
 .idea/
 .DS_Store
-Thumbs.db
+Thumbs.db       
+.env

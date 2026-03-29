@@ -2,6 +2,8 @@ import numpy as np
 import pywt
 import cv2
 from PIL import Image
+import matplotlib
+matplotlib.use('Agg')  # Headless backend — must be set before importing pyplot
 import matplotlib.pyplot as plt
 import io
 

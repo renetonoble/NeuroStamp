@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: neurostamp
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false        # Set manually in Render dashboard — keeps the secret out of git
+      - key: NEUROSTAMP_SECURE_COOKIES
+        value: "true"      # Enable secure cookies since Render runs behind HTTPS
