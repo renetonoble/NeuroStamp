@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()  # Load .env file early so all env vars are available at startup
+
 from fastapi import FastAPI, UploadFile, File, Form, Depends, Request, Response, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -9,9 +12,35 @@ from src.utils import load_image, save_image, binary_to_text, compute_dhash, cal
 from src.core import embed_watermark, extract_watermark
 import shutil, os, uuid, numpy as np, secrets
 from PIL import Image, ImageFilter
+import asyncio
+import time
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 app = FastAPI()
+
+
+# ============================================================
+# SECURITY HEADERS MIDDLEWARE
+# ============================================================
+# Adds defensive HTTP headers to every response:
+# Prevents clickjacking, MIME sniffing, XSS, and enforces HTTPS.
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://code.jquery.com https://cdn.tailwindcss.com https://unpkg.com; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com https://unpkg.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "connect-src 'self';"
+    )
+    return response
 
 # ============================================================
 # 1. SECURITY SETUP
@@ -139,6 +168,28 @@ os.makedirs("static/uploads", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 init_db()
+
+def cleanup_old_files():
+    """Deletes files in static/uploads and static/vis older than 1 hour to prevent disk bloat."""
+    now = time.time()
+    for directory in ["static/uploads", "static/vis"]:
+        if os.path.exists(directory):
+            for filename in os.listdir(directory):
+                if filename == ".gitkeep": continue
+                filepath = os.path.join(directory, filename)
+                if os.path.isfile(filepath):
+                    if os.stat(filepath).st_mtime < now - 3600:
+                        try: os.remove(filepath)
+                        except Exception: pass
+
+@app.on_event("startup")
+async def startup_event():
+    async def periodic_cleanup():
+        while True:
+            cleanup_old_files()
+            await asyncio.sleep(3600)  # Check every hour
+    
+    asyncio.create_task(periodic_cleanup())
 
 def get_secure_filename(filename: str) -> str:
     """
@@ -560,6 +611,52 @@ async def view_database(request: Request, db: Session = Depends(get_db)):
 
 
 # ============================================================
+# ADMIN PANEL ROUTES
+# ============================================================
+
+@app.get("/admin-access", response_class=HTMLResponse)
+async def admin_access_page(request: Request):
+    """Serve the admin login page. Redirects to panel if already authenticated."""
+    username = get_session_user(request)
+    if username and (not ADMIN_USERS or username in ADMIN_USERS):
+        return RedirectResponse(url="/admin-panel")
+    return templates.TemplateResponse("admin_login.html", {"request": request})
+
+
+@app.post("/admin-auth")
+async def admin_auth(
+    request: Request,
+    response: Response,
+    username: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Authenticate admin credentials and issue a session cookie."""
+    user = db.query(User).filter(User.username == username).first()
+    if not user or not verify_password(password, user.hashed_password):
+        return JSONResponse({"status": "error", "message": "Invalid credentials"}, status_code=401)
+
+    # Admin restriction check
+    if ADMIN_USERS and username not in ADMIN_USERS:
+        return JSONResponse({"status": "error", "message": "Admin access not granted"}, status_code=403)
+
+    resp = JSONResponse({"status": "success"})
+    set_secure_cookie(resp, "user_session", sign_session(username))
+    return resp
+
+
+@app.get("/admin-panel", response_class=HTMLResponse)
+async def admin_panel(request: Request):
+    """Protected admin panel — requires authenticated session with admin privileges."""
+    username = get_session_user(request)
+    if not username:
+        return RedirectResponse(url="/admin-access")
+    if ADMIN_USERS and username not in ADMIN_USERS:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return templates.TemplateResponse("admin_panel.html", {"request": request, "username": username})
+
+
+# ============================================================
 # VISUALIZATION ENGINE ENDPOINTS
 # ============================================================
 
@@ -635,3 +732,8 @@ async def process_visualization(
     })
     set_secure_cookie(response, "csrf_token", new_csrf, httponly=False)
     return response
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

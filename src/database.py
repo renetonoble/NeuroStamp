@@ -7,10 +7,48 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import json
 import os
 import secrets
+import urllib.parse as _urlparse
 
+# ============================================================
 # 1. DATABASE SETUP
-SQLALCHEMY_DATABASE_URL = "sqlite:///./neurostamp.db"
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+# ============================================================
+# Set DATABASE_URL env var to a PostgreSQL connection string for cloud hosting.
+# Falls back to local SQLite for development when the env var is not set.
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./neurostamp.db")
+
+# Render / some providers serve "postgres://" (legacy) — SQLAlchemy needs "postgresql://"
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# Use psycopg3 dialect if available (works with Python 3.10+)
+if DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgresql+psycopg2://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+    DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
+
+# Strip query params that psycopg3 doesn't support (e.g., Neon's channel_binding=require)
+_UNSUPPORTED_PARAMS = {"channel_binding"}
+if DATABASE_URL.startswith("postgresql"):
+    _parsed = _urlparse.urlparse(DATABASE_URL)
+    _qs = {k: v for k, v in _urlparse.parse_qsl(_parsed.query) if k not in _UNSUPPORTED_PARAMS}
+    DATABASE_URL = _urlparse.urlunparse(_parsed._replace(query=_urlparse.urlencode(_qs)))
+
+IS_POSTGRES = DATABASE_URL.startswith("postgresql")
+
+if IS_POSTGRES:
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=10,
+    )
+else:
+    # SQLite-specific: disable same-thread check for FastAPI's threading model
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+    )
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
